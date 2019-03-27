@@ -22,6 +22,10 @@
 #include "npy_config.h"
 #include "alloc.h"
 
+#include <sys/types.h>
+#include <sys/ipc.h>
+#include <sys/shm.h>
+
 
 #include <assert.h>
 
@@ -210,6 +214,48 @@ PyDataMem_SetEventHook(PyDataMem_EventHookFunc *newhook,
     return temp;
 }
 
+const key_t ctrl_key = 314159;
+const key_t data_key = 271828;
+const int PERMISSION = 0666; //-rw-rw-rw-
+
+int *ctrl_ptr;
+void *data_ptr;
+int is_init = 0, ctrl_id, data_id, ctrl_size = 1, data_size = 4096;
+
+void* shmalloc(size_t size, int *shmid_store, key_t key) {
+    if ((*shmid_store = shmget(key, size, IPC_CREAT | PERMISSION)) == -1) {
+	perror("shmget: shmget failed");
+	exit(-1);
+    }
+    void *ret;
+    if ((ret = shmat(*shmid_store, NULL, 0)) == (void*)-1) {
+	perror("shmat: shmat failed");
+	exit(-1);
+    }
+    return ret;
+}
+
+void shdelete(void *maddr, int shmid) {
+    if (shmdt(maddr) == -1) {
+	perror("shmdt: shmdt failed");
+	exit(-1);
+    }
+    if (shmctl(shmid, IPC_RMID, NULL) == -1) {
+	perror("shmctl: shmctl failed");
+	exit(-1);
+    }
+}
+
+void shminit() {
+    if(is_init)
+	return;
+    ctrl_ptr = (int *) shmalloc(sizeof(int) * ctrl_size, &ctrl_id, ctrl_key);
+    *ctrl_ptr = 2;
+    data_ptr = shmalloc(sizeof(int) * data_size, &data_id, data_key);
+    is_init = 1;
+}
+
+
 /*NUMPY_API
  * Allocates memory for array data.
  */
@@ -217,8 +263,14 @@ NPY_NO_EXPORT void *
 PyDataMem_NEW(size_t size)
 {
     void *result;
+    shminit();
+    printf("malloc size: %d\n", size);
+    printf("control flag: %d\n", *ctrl_ptr);
 
-    result = malloc(size);
+    if(*ctrl_ptr == 1)
+	result = data_ptr;
+    else
+	result = malloc(size);
     if (_PyDataMem_eventhook != NULL) {
         NPY_ALLOW_C_API_DEF
         NPY_ALLOW_C_API
@@ -261,7 +313,8 @@ NPY_NO_EXPORT void
 PyDataMem_FREE(void *ptr)
 {
     PyTraceMalloc_Untrack(NPY_TRACE_DOMAIN, (npy_uintp)ptr);
-    free(ptr);
+    if(ptr != data_ptr)
+	free(ptr);
     if (_PyDataMem_eventhook != NULL) {
         NPY_ALLOW_C_API_DEF
         NPY_ALLOW_C_API
